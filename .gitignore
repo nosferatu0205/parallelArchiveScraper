@@ -1,0 +1,15 @@
+#gitignore for nodejs
+node_modules/
+# Ignore log files
+*.log
+# Ignore environment variables
+.env
+# Ignore coverage reports
+coverage/
+# Ignore build directories
+dist/
+package-lock.json
+package.json
+# Ignore temporary files
+tmp/
+output/
