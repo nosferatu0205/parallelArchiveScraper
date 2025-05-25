@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  scraper:
+    build: .
+    container_name: newage-price-scraper
+    environment:
+      # Default environment variables (can be overridden)
+      - START_DATE=${START_DATE:-2024-01-01}
+      - END_DATE=${END_DATE:-2024-01-31}
+      - WORKERS=${WORKERS:-4}
+      - COMMODITIES=${COMMODITIES:-Sugar,Rice,Broiler Chicken,Eggs,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil}
+      - NODE_ENV=production
+    volumes:
+      # Mount output directory to host
+      - ./output:/app/output
+      # Mount logs if needed
+      - ./logs:/app/logs
+    command: >
+      node parallelArchiveScraper.js
+      --start ${START_DATE:-2024-01-01}
+      --end ${END_DATE:-2024-01-31}
+      --workers ${WORKERS:-4}
+      --commodities "${COMMODITIES:-Sugar,Rice,Broiler Chicken,Eggs}"
+    # Resource limits to prevent memory issues
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+    # Restart policy
+    restart: on-failure:3
+    # Network mode for better performance
+    network_mode: bridge
+
+    
