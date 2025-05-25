@@ -1,0 +1,32 @@
+{
+  "name": "newage-price-scraper",
+  "version": "1.0.0",
+  "description": "Parallel web scraper for commodity prices from New Age BD",
+  "main": "parallelArchiveScraper.js",
+  "scripts": {
+    "start": "node parallelArchiveScraper.js",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "scrape": "node parallelArchiveScraper.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "scraper",
+    "puppeteer",
+    "commodity-prices",
+    "bangladesh"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^21.0.0",
+    "date-fns": "^2.30.0",
+    "fs-extra": "^11.1.1",
+    "commander": "^11.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
