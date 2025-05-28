@@ -167,50 +167,31 @@ function determinePriceType(context) {
   return 'Retail'; // Default to retail
 }
 
-/* IMPROVED PAGE LOADING WITH RETRIES */
-async function loadPageWithRetry(page, url, retries = 3) {
-  for (let attempt = 1; attempt <= retries; attempt++) {
+/* SIMPLE PAGE LOADING - More like original Puppeteer approach */
+async function loadPageSafely(page, url, workerId) {
+  try {
+    // Simple goto with reasonable timeout
+    await page.goto(url, { 
+      waitUntil: 'domcontentloaded', 
+      timeout: 20000 
+    });
+    
+    // Quick check if content exists
     try {
-      // Use multiple strategies with shorter individual timeouts
-      await page.goto(url, { 
-        waitUntil: 'domcontentloaded', 
-        timeout: 15000 
-      });
-      
-      // Wait for the main content to be visible instead of network idle
-      try {
-        await page.waitForSelector('div.post-content', { timeout: 5000 });
-      } catch (selectorError) {
-        // If post-content not found, check if page loaded at all
-        const title = await page.title();
-        if (!title || title === '') {
-          throw new Error('Page appears to be empty');
-        }
-      }
-      
-      // Give a moment for any critical JS to execute
-      await page.waitForTimeout(1000);
-      
-      return true; // Success
-      
-    } catch (error) {
-      console.log(`Attempt ${attempt}/${retries} failed for ${url}: ${error.message}`);
-      
-      if (attempt < retries) {
-        // Wait before retry with exponential backoff
-        await delay(1000 * attempt);
-        
-        // Try to recover the page state
-        try {
-          await page.goto('about:blank');
-          await delay(500);
-        } catch (recoveryError) {
-          // Ignore recovery errors
-        }
-      } else {
-        throw error; // Final attempt failed
-      }
+      await page.waitForSelector('div.post-content, article .content, main', { timeout: 3000 });
+    } catch (e) {
+      // Don't fail if selector not found - content might still be accessible
     }
+    
+    // Brief pause for JS
+    await page.waitForTimeout(500);
+    
+    return true;
+    
+  } catch (error) {
+    // Log but don't throw - just like original implementation
+    console.error(`[Worker ${workerId}] Error loading ${url}: ${error.message}`);
+    return false;
   }
 }
 
@@ -271,9 +252,13 @@ if (!isMainThread) {
         try {
           console.log(`[Worker ${workerId}] Processing ${date}`);
           
-          // Load archive page with retry
+          // Load archive page
           const url = `${ARCHIVE_URL_BASE}${date}`;
-          await loadPageWithRetry(page, url, config.retryAttempts || 3);
+          const loaded = await loadPageSafely(page, url, workerId);
+          if (!loaded) {
+            console.log(`[Worker ${workerId}] Skipping ${date} due to load failure`);
+            continue;
+          }
           
           // Scroll to load all articles
           await scrollToBottom(page);
@@ -305,8 +290,12 @@ if (!isMainThread) {
           
           for (const article of relevantArticles) {
             try {
-              // Load article page with retry
-              await loadPageWithRetry(page, article.url, 2); // Fewer retries for individual articles
+              // Load article page
+              const loaded = await loadPageSafely(page, article.url, workerId);
+              if (!loaded) {
+                failedCount++;
+                continue; // Skip this article
+              }
               
               // Extract content with multiple selectors
               const content = await page.evaluate(() => {

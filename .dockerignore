@@ -1,15 +1,9 @@
 node_modules
 npm-debug.log
+output/*
 .git
 .gitignore
 README.md
 .env
-.env.local
 .DS_Store
-output/*
-logs/*
 *.log
-.vscode
-.idea
-temp/
-*.tmp
