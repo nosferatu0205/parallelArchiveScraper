@@ -1,9 +1,36 @@
+# Ignore unnecessary files to speed up build context
 node_modules
 npm-debug.log
-output/*
+output
+*.log
 .git
 .gitignore
 README.md
 .env
+.env.local
 .DS_Store
-*.log
+Thumbs.db
+
+# Docker files
+Dockerfile
+.dockerignore
+
+# IDE files
+.vscode
+.idea
+*.swp
+*.swo
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+/tmp

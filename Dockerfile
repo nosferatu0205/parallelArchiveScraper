@@ -1,69 +1,46 @@
-# Use official Node.js image as base
-FROM node:18-slim
+# Use Playwright's official image with pre-installed browsers
+FROM mcr.microsoft.com/playwright:v1.40.0-jammy
 
-# Install dependencies for Playwright
-RUN apt-get update && apt-get install -y \
-    wget \
-    ca-certificates \
-    fonts-liberation \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libc6 \
-    libcairo2 \
-    libcups2 \
-    libdbus-1-3 \
-    libexpat1 \
-    libfontconfig1 \
-    libgbm1 \
-    libgcc1 \
-    libglib2.0-0 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    libstdc++6 \
-    libx11-6 \
-    libx11-xcb1 \
-    libxcb1 \
-    libxcomposite1 \
-    libxcursor1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxi6 \
-    libxrandr2 \
-    libxrender1 \
-    libxss1 \
-    libxtst6 \
-    lsb-release \
-    xdg-utils \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy package files
+# Install Node.js 18 (Playwright image comes with Node 16 by default)
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y nodejs
+
+# Copy package files first for better caching
 COPY package*.json ./
 
-# Install npm dependencies
-RUN npm ci --only=production
+# Install dependencies (keeping dev dependencies for Playwright CLI)
+RUN npm ci
 
-# Install Playwright browsers
-RUN npx playwright install chromium
+# Verify Playwright installation and browsers
+RUN npx playwright --version && \
+    ls -la /ms-playwright/chromium-*/chrome-linux/chrome
 
-# Copy application files
-COPY . .
+# Copy application code
+COPY parallelArchiveScraperPlaywright.js ./
+COPY docker-compose.yml ./
 
-# Create output directory
+# Create output directory with proper permissions
 RUN mkdir -p output
 
-# Run as non-root user for security
-RUN groupadd -r scraper && useradd -r -g scraper -G audio,video scraper \
-    && chown -R scraper:scraper /app
+# Create non-root user (playwright user already exists in base image)
+RUN chown -R playwright:playwright /app
 
-USER scraper
+# Switch to non-root user
+USER playwright
 
-# Default command (can be overridden)
-CMD ["node", "parallelArchiveScraperPlaywright.js", "--start", "2024-01-01", "--end", "2024-01-01", "--workers", "2", "--headless"]
+# Expose any ports if needed (optional)
+# EXPOSE 3000
+
+# Health check to ensure the scraper can start
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD node -e "console.log('Health check passed')" || exit 1
+
+# Default command with sensible defaults for testing
+CMD ["node", "parallelArchiveScraperPlaywright.js", \
+    "--start", "2024-01-01", \
+    "--end", "2024-01-03", \
+    "--workers", "2", \
+    "--headless"]
