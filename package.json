@@ -10,6 +10,7 @@
     "docker:down": "docker-compose down",
     "docker:logs": "docker-compose logs -f",
     "scrape": "node parallelArchiveScraper.js",
+    "start:cron:job": "node cron-entry-point.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
