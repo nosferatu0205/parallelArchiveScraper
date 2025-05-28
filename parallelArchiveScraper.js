@@ -1,7 +1,7 @@
-// parallelArchiveScraper.js
-// npm install puppeteer date-fns fs-extra commander
+// parallelArchiveScraperPlaywright.js
+// npm install playwright date-fns fs-extra commander
 
-const puppeteer = require('puppeteer');
+const { chromium } = require('playwright');
 const { format, parseISO, eachDayOfInterval } = require('date-fns');
 const fs = require('fs-extra');
 const path = require('path');
@@ -17,7 +17,10 @@ if (isMainThread) {
     .option('--workers <number>', 'Number of parallel workers', '4')
     .option('--commodities <items>', 'Comma-separated list of commodities', 
       'Sugar,Rice,Broiler Chicken,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil,Eggs,Green Chillies')
-    .option('--debug', 'Enable debug logging');
+    .option('--debug', 'Enable debug logging')
+    .option('--headless', 'Run in headless mode', true)
+    .option('--retry-attempts <number>', 'Number of retry attempts for failed pages', '3')
+    .option('--page-timeout <seconds>', 'Page load timeout in seconds', '30');
 
   program.parse();
   options = program.opts();
@@ -164,118 +167,231 @@ function determinePriceType(context) {
   return 'Retail'; // Default to retail
 }
 
+/* IMPROVED PAGE LOADING WITH RETRIES */
+async function loadPageWithRetry(page, url, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      // Use multiple strategies with shorter individual timeouts
+      await page.goto(url, { 
+        waitUntil: 'domcontentloaded', 
+        timeout: 15000 
+      });
+      
+      // Wait for the main content to be visible instead of network idle
+      try {
+        await page.waitForSelector('div.post-content', { timeout: 5000 });
+      } catch (selectorError) {
+        // If post-content not found, check if page loaded at all
+        const title = await page.title();
+        if (!title || title === '') {
+          throw new Error('Page appears to be empty');
+        }
+      }
+      
+      // Give a moment for any critical JS to execute
+      await page.waitForTimeout(1000);
+      
+      return true; // Success
+      
+    } catch (error) {
+      console.log(`Attempt ${attempt}/${retries} failed for ${url}: ${error.message}`);
+      
+      if (attempt < retries) {
+        // Wait before retry with exponential backoff
+        await delay(1000 * attempt);
+        
+        // Try to recover the page state
+        try {
+          await page.goto('about:blank');
+          await delay(500);
+        } catch (recoveryError) {
+          // Ignore recovery errors
+        }
+      } else {
+        throw error; // Final attempt failed
+      }
+    }
+  }
+}
+
 /* WORKER THREAD CODE */
 if (!isMainThread) {
   // This code runs in worker threads
   (async () => {
-    const { dates, workerId, config } = workerData;
+    const { dates, workerId, config, browserWSEndpoint } = workerData;
     const results = [];
     
-    const browser = await puppeteer.launch({ 
-  headless: true,
-  args: [
-    '--no-sandbox', 
-    '--disable-setuid-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-accelerated-2d-canvas',
-    '--no-first-run',
-    '--no-zygote',
-    '--single-process',
-    '--disable-gpu'
-  ],
-  executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || puppeteer.executablePath()
-});
+    let browser;
+    let context;
+    let page;
     
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36');
-    
-    for (const date of dates) {
-      try {
-        console.log(`[Worker ${workerId}] Processing ${date}`);
-        
-        // Load archive page
-        const url = `${ARCHIVE_URL_BASE}${date}`;
-        await page.goto(url, { waitUntil: 'networkidle2', timeout: 30000 });
-        
-        // Scroll to load all articles
-        await scrollToBottom(page);
-        
-        // Get all articles
-        const articles = await page.evaluate(() => {
-          const articleElements = document.querySelectorAll('article.card.card-full');
-          return Array.from(articleElements).map(article => {
-            const titleElement = article.querySelector('h2.card-title a');
-            const timeElement = article.querySelector('time');
-            
-            return {
-              title: titleElement ? titleElement.textContent.trim() : '',
-              url: titleElement ? titleElement.href : '',
-              date: timeElement ? timeElement.getAttribute('datetime') : ''
-            };
-          }).filter(a => a.title && a.url);
+    try {
+      // Connect to existing browser or create new one
+      if (browserWSEndpoint) {
+        browser = await chromium.connect(browserWSEndpoint);
+      } else {
+        browser = await chromium.launch({ 
+          headless: config.headless !== false,
+          args: [
+            '--disable-blink-features=AutomationControlled',
+            '--disable-features=IsolateOrigins,site-per-process',
+            '--disable-web-security',
+            '--disable-setuid-sandbox',
+            '--no-sandbox'
+          ]
         });
-        
-        console.log(`[Worker ${workerId}] Found ${articles.length} articles for ${date}`);
-        
-        // Filter and process relevant articles
-        const relevantArticles = articles.filter(article => hasRelevantKeywords(article.title));
-        console.log(`[Worker ${workerId}] ${relevantArticles.length} articles with price keywords`);
-        
-        // Process each article
-        for (const article of relevantArticles) {
-          try {
-            await page.goto(article.url, { waitUntil: 'networkidle2', timeout: 20000 });
-            
-            // Extract content
-            const content = await page.evaluate(() => {
-              const contentDiv = document.querySelector('div.post-content');
-              if (!contentDiv) return '';
+      }
+      
+      // Create a context with anti-detection measures
+      context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+        viewport: { width: 1920, height: 1080 },
+        deviceScaleFactor: 1,
+        hasTouch: false,
+        javascriptEnabled: true
+      });
+      
+      // Set additional headers
+      await context.setExtraHTTPHeaders({
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+      });
+      
+      page = await context.newPage();
+      
+      // Add stealth behaviors
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      });
+      
+      for (const date of dates) {
+        try {
+          console.log(`[Worker ${workerId}] Processing ${date}`);
+          
+          // Load archive page with retry
+          const url = `${ARCHIVE_URL_BASE}${date}`;
+          await loadPageWithRetry(page, url, config.retryAttempts || 3);
+          
+          // Scroll to load all articles
+          await scrollToBottom(page);
+          
+          // Get all articles
+          const articles = await page.evaluate(() => {
+            const articleElements = document.querySelectorAll('article.card.card-full');
+            return Array.from(articleElements).map(article => {
+              const titleElement = article.querySelector('h2.card-title a');
+              const timeElement = article.querySelector('time');
               
-              const paragraphs = contentDiv.querySelectorAll('p');
-              return Array.from(paragraphs)
-                .map(p => p.textContent.trim())
-                .filter(text => text.length > 0)
-                .join(' ');
-            });
-            
-            if (!content) continue;
-            
-            // Find all commodities mentioned - use config passed from main thread
-            const commoditiesFound = findCommodityMatches(content, config.commodities);
-            
-            // Extract prices for each commodity
-            for (const commodity of commoditiesFound) {
-              const pricesData = extractPricesForCommodity(content, commodity);
+              return {
+                title: titleElement ? titleElement.textContent.trim() : '',
+                url: titleElement ? titleElement.href : '',
+                date: timeElement ? timeElement.getAttribute('datetime') : ''
+              };
+            }).filter(a => a.title && a.url);
+          });
+          
+          console.log(`[Worker ${workerId}] Found ${articles.length} articles for ${date}`);
+          
+          // Filter and process relevant articles
+          const relevantArticles = articles.filter(article => hasRelevantKeywords(article.title));
+          console.log(`[Worker ${workerId}] ${relevantArticles.length} articles with price keywords`);
+          
+          // Process each article
+          let processedCount = 0;
+          let failedCount = 0;
+          
+          for (const article of relevantArticles) {
+            try {
+              // Load article page with retry
+              await loadPageWithRetry(page, article.url, 2); // Fewer retries for individual articles
               
-              if (pricesData.length > 0) {
-                for (const priceData of pricesData) {
-                  results.push({
-                    date: article.date,
-                    commodity: commodity,
-                    price: priceData.price,
-                    priceType: priceData.priceType,
-                    articleTitle: article.title,
-                    articleUrl: article.url
-                  });
+              // Extract content with multiple selectors
+              const content = await page.evaluate(() => {
+                // Try multiple possible content selectors
+                const selectors = ['div.post-content', 'article .content', 'main .article-body', '.news-content'];
+                
+                for (const selector of selectors) {
+                  const contentDiv = document.querySelector(selector);
+                  if (contentDiv) {
+                    const paragraphs = contentDiv.querySelectorAll('p');
+                    const text = Array.from(paragraphs)
+                      .map(p => p.textContent.trim())
+                      .filter(text => text.length > 0)
+                      .join(' ');
+                    
+                    if (text.length > 0) return text;
+                  }
+                }
+                
+                // Fallback: get all text from body
+                const bodyText = document.body.innerText || document.body.textContent || '';
+                return bodyText.trim();
+              });
+              
+              if (!content || content.length < 50) {
+                console.log(`[Worker ${workerId}] Skipping article with insufficient content: ${article.title}`);
+                continue;
+              }
+              
+              // Find all commodities mentioned
+              const commoditiesFound = findCommodityMatches(content, config.commodities);
+              
+              // Extract prices for each commodity
+              for (const commodity of commoditiesFound) {
+                const pricesData = extractPricesForCommodity(content, commodity);
+                
+                if (pricesData.length > 0) {
+                  for (const priceData of pricesData) {
+                    results.push({
+                      date: article.date,
+                      commodity: commodity,
+                      price: priceData.price,
+                      priceType: priceData.priceType,
+                      articleTitle: article.title,
+                      articleUrl: article.url
+                    });
+                  }
                 }
               }
+              
+              processedCount++;
+              
+              // Shorter delay between articles
+              await delay(500 + Math.random() * 500);
+              
+            } catch (error) {
+              console.error(`[Worker ${workerId}] Error processing article "${article.title}": ${error.message}`);
+              failedCount++;
+              
+              // Don't let too many failures stop the entire process
+              if (failedCount > relevantArticles.length * 0.5) {
+                console.error(`[Worker ${workerId}] Too many failures, moving to next date`);
+                break;
+              }
             }
-            
-            await delay(1000 + Math.random() * 500);
-            
-          } catch (error) {
-            console.error(`[Worker ${workerId}] Error processing article: ${error.message}`);
           }
+          
+          console.log(`[Worker ${workerId}] Processed ${processedCount}/${relevantArticles.length} articles for ${date}`);
+          
+          // Delay between dates
+          await delay(1000 + Math.random() * 1000);
+          
+        } catch (error) {
+          console.error(`[Worker ${workerId}] Failed to process ${date}: ${error.message}`);
         }
-        
-        await delay(2000 + Math.random() * 1000);
-        
-      } catch (error) {
-        console.error(`[Worker ${workerId}] Failed to process ${date}: ${error.message}`);
       }
+      
+    } catch (error) {
+      console.error(`[Worker ${workerId}] Fatal error: ${error.message}`);
+    } finally {
+      // Cleanup
+      if (page) await page.close().catch(() => {});
+      if (context) await context.close().catch(() => {});
+      if (browser && !browserWSEndpoint) await browser.close().catch(() => {});
     }
-    
-    await browser.close();
     
     // Send results back to main thread
     parentPort.postMessage({ workerId, results });
@@ -288,13 +404,17 @@ async function scrollToBottom(page) {
   let currentHeight = await page.evaluate(() => document.body.scrollHeight);
   let attempts = 0;
   
-  while (previousHeight !== currentHeight && attempts < 20) {
+  while (previousHeight !== currentHeight && attempts < 10) { // Reduced max attempts
     previousHeight = currentHeight;
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await delay(2000);
     
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+    await page.waitForTimeout(1500); // Slightly shorter wait
+    
+    // Check for end marker
     const hasEndMarker = await page.evaluate(() => {
-      return document.querySelector('div.google-auto-placed') !== null;
+      return document.querySelector('div.google-auto-placed') !== null ||
+             document.querySelector('.no-more-articles') !== null ||
+             document.querySelector('.end-of-content') !== null;
     });
     
     if (hasEndMarker) break;
@@ -302,13 +422,18 @@ async function scrollToBottom(page) {
     currentHeight = await page.evaluate(() => document.body.scrollHeight);
     attempts++;
   }
+  
+  // Final wait for any last content
+  await page.waitForTimeout(1000);
 }
 
 async function runParallelScraper() {
-  console.log('🚀 Starting Parallel Multi-Commodity Scraper');
+  console.log('🚀 Starting Parallel Multi-Commodity Scraper (Playwright Edition)');
   console.log(`📅 Date Range: ${options.start} to ${options.end}`);
   console.log(`📦 Commodities: ${options.commodities}`);
   console.log(`👷 Workers: ${options.workers}`);
+  console.log(`⏱️  Page timeout: ${options.pageTimeout || 30}s`);
+  console.log(`🔄 Retry attempts: ${options.retryAttempts || 3}`);
   
   // Generate all dates
   const allDates = eachDayOfInterval({
@@ -317,6 +442,19 @@ async function runParallelScraper() {
   }).map(date => format(date, 'yyyy-MM-dd'));
   
   console.log(`📊 Total days to process: ${allDates.length}`);
+  
+  // Optional: Create a shared browser for all workers (more efficient)
+  let sharedBrowser = null;
+  let browserWSEndpoint = null;
+  
+  if (allDates.length > 10) { // Use shared browser for larger jobs
+    console.log('🌐 Creating shared browser instance for efficiency...');
+    sharedBrowser = await chromium.launch({ 
+      headless: options.headless !== false,
+      args: ['--disable-blink-features=AutomationControlled']
+    });
+    browserWSEndpoint = sharedBrowser.wsEndpoint();
+  }
   
   // Split dates among workers
   const workerCount = parseInt(options.workers);
@@ -340,8 +478,12 @@ async function runParallelScraper() {
         workerId: i + 1,
         config: {
           commodities: options.commodities,
-          debug: options.debug
-        }
+          debug: options.debug,
+          headless: options.headless,
+          retryAttempts: parseInt(options.retryAttempts) || 3,
+          pageTimeout: parseInt(options.pageTimeout) || 30
+        },
+        browserWSEndpoint
       }
     });
     
@@ -360,7 +502,16 @@ async function runParallelScraper() {
   
   // Wait for all workers to complete
   console.log('\n⏳ Processing... This may take a while.\n');
-  const workerResults = await Promise.all(workerPromises);
+  
+  let workerResults;
+  try {
+    workerResults = await Promise.all(workerPromises);
+  } finally {
+    // Clean up shared browser
+    if (sharedBrowser) {
+      await sharedBrowser.close().catch(console.error);
+    }
+  }
   
   // Combine all results
   const allResults = [];
@@ -428,7 +579,10 @@ async function generateCommodityCSVs(results) {
   console.log(`\n📊 Summary: ${results.length} total price entries across ${Object.keys(commodityGroups).length} commodities`);
 }
 
-// Run the scraper if main thread
-if (isMainThread) {
+// Export for use in other modules (like node-cron integration)
+module.exports = { runParallelScraper };
+
+// Run the scraper if main thread and called directly
+if (isMainThread && require.main === module) {
   runParallelScraper().catch(console.error);
 }
