@@ -1,0 +1,92 @@
+// config.js
+const { program } = require('commander');
+
+// Parse CLI arguments
+program
+  .requiredOption('--start <date>', 'Start date YYYY-MM-DD')
+  .requiredOption('--end <date>', 'End date YYYY-MM-DD')
+  .option('--workers <number>', 'Number of parallel workers', '4')
+  .option('--commodities <items>', 'Comma-separated list of commodities', 
+    'Sugar,Rice,Broiler Chicken,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil,Eggs,Green Chillies')
+  .option('--debug', 'Enable debug logging')
+  .option('--headless', 'Run in headless mode', true)
+  .option('--retry-attempts <number>', 'Number of retry attempts for failed pages', '3')
+  .option('--page-timeout <seconds>', 'Page load timeout in seconds', '30');
+
+program.parse();
+const options = program.opts();
+
+// Constants
+const ARCHIVE_URL_BASE = 'https://www.newagebd.net/archive?date=';
+
+// Product variants for flexible matching
+const PRODUCT_VARIANTS = {
+  'Sugar': ['sugar', 'refined sugar', 'white sugar', 'packaged sugar', 'চিনি'],
+  'Rice': ['rice', 'chal', 'চাল', 'miniket', 'najirshail', 'coarse rice', 'fine rice'],
+  'Broiler Chicken': ['broiler', 'chicken', 'murgi', 'মুরগি', 'farm chicken', 'poultry'],
+  'Hilsa Fish': ['hilsa', 'ilish', 'ইলিশ', 'hilsha'],
+  'Pangas Fish': ['pangas', 'পাঙ্গাস', 'pangash'],
+  'Potato': ['potato', 'alu', 'আলু', 'potatoes'],
+  'Onion': ['onion', 'peyaj', 'পেঁয়াজ', 'onions'],
+  'Soybean Oil': ['soybean oil', 'soyabean oil', 'soya oil', 'সয়াবিন তেল'],
+  'Palm Oil': ['palm oil', 'palm', 'পাম তেল'],
+  'Eggs': ['egg', 'eggs', 'dim', 'ডিম', 'hali'],
+  'Green Chillies': ['green chilli', 'green chillies', 'kacha morich', 'কাঁচা মরিচ', 'chilli', 'chillies'],
+  'Garlic': ['garlic', 'roshun', 'রসুন'],
+  'Ginger': ['ginger', 'ada', 'আদা'],
+  'Tomato': ['tomato', 'tomatoes', 'টমেটো'],
+  'Beef': ['beef', 'গরুর মাংস', 'cow meat'],
+  'Mutton': ['mutton', 'খাসির মাংস', 'goat meat'],
+  'Katla Fish': ['katla', 'কাতলা'],
+  'Rohita Fish': ['rohita', 'rui', 'রুই'],
+  'Tilapia Fish': ['tilapia', 'তেলাপিয়া'],
+  'Lentils': ['lentils', 'dal', 'ডাল', 'mosur', 'মসুর'],
+  'Milk': ['milk', 'dudh', 'দুধ'],
+  'Aubergine': ['aubergine', 'brinjal', 'begun', 'বেগুন', 'eggplant'],
+  'Papaya': ['papaya', 'pepe', 'পেঁপে'],
+  'Bitter Gourd': ['bitter gourd', 'korola', 'করলা', 'uchche'],
+  'Pointed Gourd': ['pointed gourd', 'potol', 'পটল'],
+  'Okra': ['okra', 'bhindi', 'ঢেঁড়স', 'dherosh'],
+  'String Beans': ['string beans', 'sheem', 'শিম', 'beans'],
+  'Teasel Gourd': ['teasel gourd', 'kakrol', 'কাঁকরোল'],
+  'Ridge Gourd': ['ridge gourd', 'jhinge', 'ঝিঙে'],
+  'Snake Gourd': ['snake gourd', 'chichinga', 'চিচিঙ্গা']
+};
+
+// Broader keywords for initial filtering
+const PRICE_KEYWORDS = [
+  'price', 'prices', 'Tk', 'taka', 'market', 'commodity', 'commodities',
+  'rises', 'rise', 'falls', 'fall', 'increase', 'decrease', 'up', 'down',
+  'wholesale', 'retail', 'essentials', 'kitchen', 'bazaar', 'bazar',
+  'per kg', 'per kilogram', 'per litre', 'per hali', 'cost', 'rate',
+  'টাকা', 'দাম', 'মূল্য', 'বাজার'
+];
+
+// Enhanced price patterns
+const PRICE_PATTERNS = [
+  // Tk X-Y per unit
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  
+  // Single price with unit
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  
+  // Price before unit (120 taka per kg)
+  /(\d+[\d,.]*\s*(?:taka|Taka|tk|Tk|টাকা)\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  
+  // Hali specific pattern (4 pieces)
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)?\s*\d*[\d,.]*?\s*(?:per|প্রতি)?\s*hali\s*\(?(?:4\s*(?:pcs|pieces))?\)?)/ig,
+  
+  // Container patterns (5L, 1L bottle, etc)
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)?\s*\d*[\d,.]*?\s*(?:per|প্রতি)?\s*\d+\s*(?:L|l|litre|liter|লিটার)\s*(?:bottle|container|pack)?)/ig,
+  
+  // General price
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*)/ig
+];
+
+module.exports = {
+  options,
+  ARCHIVE_URL_BASE,
+  PRODUCT_VARIANTS,
+  PRICE_KEYWORDS,
+  PRICE_PATTERNS
+};
