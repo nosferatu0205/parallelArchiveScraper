@@ -32,7 +32,9 @@ async function runParallelScraper() {
       headless: options.headless !== false,
       args: ['--disable-blink-features=AutomationControlled']
     });
-    browserWSEndpoint = sharedBrowser.wsEndpoint();
+    
+    // FIXED: wsEndpoint is a property, not a method in Playwright
+    browserWSEndpoint = sharedBrowser.wsEndpoint;
   }
   
   // Split dates among workers

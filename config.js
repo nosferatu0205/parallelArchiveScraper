@@ -1,20 +1,35 @@
 // config.js
 const { program } = require('commander');
+const { isMainThread } = require('worker_threads');
 
-// Parse CLI arguments
-program
-  .requiredOption('--start <date>', 'Start date YYYY-MM-DD')
-  .requiredOption('--end <date>', 'End date YYYY-MM-DD')
-  .option('--workers <number>', 'Number of parallel workers', '4')
-  .option('--commodities <items>', 'Comma-separated list of commodities', 
-    'Sugar,Rice,Broiler Chicken,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil,Eggs,Green Chillies')
-  .option('--debug', 'Enable debug logging')
-  .option('--headless', 'Run in headless mode', true)
-  .option('--retry-attempts <number>', 'Number of retry attempts for failed pages', '3')
-  .option('--page-timeout <seconds>', 'Page load timeout in seconds', '30');
+// Default options
+let options = {
+  start: '',
+  end: '',
+  workers: '4',
+  commodities: 'Sugar,Rice,Broiler Chicken,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil,Eggs,Green Chillies',
+  debug: false,
+  headless: true,
+  retryAttempts: '3',
+  pageTimeout: '30'
+};
 
-program.parse();
-const options = program.opts();
+// Only parse CLI arguments in the main thread
+if (isMainThread) {
+  program
+    .requiredOption('--start <date>', 'Start date YYYY-MM-DD')
+    .requiredOption('--end <date>', 'End date YYYY-MM-DD')
+    .option('--workers <number>', 'Number of parallel workers', '4')
+    .option('--commodities <items>', 'Comma-separated list of commodities', 
+      'Sugar,Rice,Broiler Chicken,Hilsa Fish,Pangas Fish,Potato,Onion,Soybean Oil,Palm Oil,Eggs,Green Chillies, Sonalika Chicken')
+    .option('--debug', 'Enable debug logging')
+    .option('--headless', 'Run in headless mode', true)
+    .option('--retry-attempts <number>', 'Number of retry attempts for failed pages', '3')
+    .option('--page-timeout <seconds>', 'Page load timeout in seconds', '30');
+
+  program.parse();
+  options = program.opts();
+}
 
 // Constants
 const ARCHIVE_URL_BASE = 'https://www.newagebd.net/archive?date=';
@@ -50,7 +65,8 @@ const PRODUCT_VARIANTS = {
   'String Beans': ['string beans', 'sheem', 'শিম', 'beans'],
   'Teasel Gourd': ['teasel gourd', 'kakrol', 'কাঁকরোল'],
   'Ridge Gourd': ['ridge gourd', 'jhinge', 'ঝিঙে'],
-  'Snake Gourd': ['snake gourd', 'chichinga', 'চিচিঙ্গা']
+  'Snake Gourd': ['snake gourd', 'chichinga', 'চিচিঙ্গা'],
+  'Sonalika Chicken': ['sonalika chicken', 'sonalika', 'সোনালী মুরগি', 'sonali chicken']
 };
 
 // Broader keywords for initial filtering
@@ -63,24 +79,22 @@ const PRICE_KEYWORDS = [
 ];
 
 // Enhanced price patterns
+// Enhanced and more specific price patterns
+// Enhanced and more specific price patterns
 const PRICE_PATTERNS = [
-  // Tk X-Y per unit
-  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  // Sold for pattern - this is usually the most reliable indicator of a current price
+  /sold\s+for\s+((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*(?:\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*)?\s*(?:per|a|an|each|\/|প্রতি)?\s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি|apiece|dozen))/ig,
   
-  // Single price with unit
-  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  // Retail/price at pattern
+  /(?:retail(?:ed|s)?|pric(?:e|ed|es)|cost(?:s|ed)?)\s+(?:at|for|of)\s+((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*(?:\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*)?\s*(?:per|a|an|each|\/|প্রতি)?\s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি|apiece|dozen))/ig,
   
-  // Price before unit (120 taka per kg)
-  /(\d+[\d,.]*\s*(?:taka|Taka|tk|Tk|টাকা)\s*(?:per|প্রতি|a|each|\/)?s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি))/ig,
+  // At Tk pattern (common in price listings)
+  /\bat\s+((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*(?:\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*)?\s*(?:per|a|an|each|\/|প্রতি)?\s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি|apiece|dozen))/ig,
   
-  // Hali specific pattern (4 pieces)
-  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)?\s*\d*[\d,.]*?\s*(?:per|প্রতি)?\s*hali\s*\(?(?:4\s*(?:pcs|pieces))?\)?)/ig,
+  // Direct price with unit - be very specific to avoid matching increases
+  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*(?:\s*(?:-|–|to|থেকে)\s*\d+[\d,.]*)?\s*(?:per|a|an|each|\/|প্রতি)\s*(?:kg|kilo|kilogram|কেজি|liter|litre|l|L|লিটার|piece|pcs|unit|hali|হালি|apiece|dozen))/ig,
   
-  // Container patterns (5L, 1L bottle, etc)
-  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*\s*(?:-|–|to|থেকে)?\s*\d*[\d,.]*?\s*(?:per|প্রতি)?\s*\d+\s*(?:L|l|litre|liter|লিটার)\s*(?:bottle|container|pack)?)/ig,
-  
-  // General price
-  /((?:Tk|TK|Taka|৳)\s*\d+[\d,.]*)/ig
+  // Avoid the generic price pattern as it causes too many false positives
 ];
 
 module.exports = {
